@@ -43,7 +43,7 @@ defmodule Mix.Tasks.Compile.Elixir do
   @switches [force: :boolean, docs: :boolean, warnings_as_errors: :boolean,
              ignore_module_conflict: :boolean, debug_info: :boolean,
              verbose: :boolean, long_compilation_threshold: :integer,
-             all_warnings: :boolean]
+             all_warnings: :boolean, continue_on_error: :boolean]
 
   @doc """
   Runs this task.

@@ -160,8 +160,10 @@ defmodule Mix.Compilers.Elixir do
             [each_module: &each_module(pid, cwd, &1, &2, &3),
              each_long_compilation: &each_long_compilation(&1, long_compilation_threshold),
              each_warning: &each_warning(pid, cwd, &1, &2, &3),
+             each_error: &each_error(pid, cwd, &1, &2, &3),
              long_compilation_threshold: long_compilation_threshold,
-             dest: dest] ++ extra
+             dest: dest,
+             continue_on_error: opts[:continue_on_error]] ++ extra
       Agent.cast pid, fn {modules, sources, warnings} ->
         write_manifest(manifest, modules, sources, dest, timestamp)
         {modules, sources, warnings}
@@ -272,6 +274,16 @@ defmodule Mix.Compilers.Elixir do
       source_path = Path.relative_to(file, cwd)
       warning = {line, message}
       warnings = Map.update(warnings, source_path, [warning], &([warning | &1]))
+      {modules, sources, warnings}
+    end
+  end
+
+  defp each_error(pid, cwd, file, line, message) do
+    Agent.cast pid, fn {modules, sources, warnings} ->
+      # Remove file from sources to ensure it's considered stale next time
+      # TODO: Save errors and return them
+      source_path = Path.relative_to(file, cwd)
+      sources = List.keydelete(sources, source_path, source(:source))
       {modules, sources, warnings}
     end
   end

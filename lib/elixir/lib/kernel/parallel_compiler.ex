@@ -158,8 +158,11 @@ defmodule Kernel.ParallelCompiler do
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
     |> Enum.sort_by(&length(elem(&1, 1)))
     |> case do
-      [{_on, refs} | _] -> spawn_compilers(%{state | entries: refs})
-      [] -> handle_deadlock(waiting, queued)
+      [{_on, refs} | _] ->
+        spawn_compilers(%{state | entries: refs})
+      [] ->
+        handle_deadlock(waiting, queued)
+        wait_for_messages(state)
     end
   end
 
@@ -235,9 +238,21 @@ defmodule Kernel.ParallelCompiler do
         end
         wait_for_messages(state)
 
-      {:DOWN, _down_ref, :process, down_pid, {:shutdown, file}} ->
-        if callback = Keyword.get(options, :each_file) do
-          callback.(file)
+      {:DOWN, down_ref, :process, down_pid, reason} ->
+        case reason do
+          {:shutdown, file} ->
+            if callback = Keyword.get(options, :each_file) do
+              callback.(file)
+            end
+          _ ->
+            if file = find_failure(down_ref, queued) do
+              print_failure(file, reason)
+              if callback = Keyword.get(options, :each_error) do
+                callback.(file, failure_line(file, reason), failure_message(reason))
+              end
+
+              unless options[:continue_on_error], do: handle_failure(queued)
+            end
         end
 
         cancel_waiting_timer(queued, down_pid)
@@ -248,10 +263,6 @@ defmodule Kernel.ParallelCompiler do
         new_queued  = List.keydelete(queued, down_pid, 0)
         new_waiting = List.keydelete(waiting, down_pid, 1)
         spawn_compilers(%{state | entries: new_entries, waiting: new_waiting, queued: new_queued})
-
-      {:DOWN, down_ref, :process, _down_pid, reason} ->
-        handle_failure(down_ref, reason, queued)
-        wait_for_messages(state)
     end
   end
 
@@ -259,12 +270,11 @@ defmodule Kernel.ParallelCompiler do
     deadlock =
       for {pid, _, file, _} <- queued do
         {:current_stacktrace, stacktrace} = Process.info(pid, :current_stacktrace)
-        Process.exit(pid, :kill)
 
         {_kind, ^pid, _, on, _} = List.keyfind(waiting, pid, 1)
         error = CompileError.exception(description: "deadlocked waiting on module #{inspect on}",
                                        file: nil, line: nil)
-        print_failure(file, {:failure, :error, error, stacktrace})
+        Process.exit(pid, {:failure, :error, error, stacktrace})
 
         {file, on}
       end
@@ -285,17 +295,13 @@ defmodule Kernel.ParallelCompiler do
     end
 
     IO.puts ""
-    exit({:shutdown, 1})
   end
 
-  defp handle_failure(ref, reason, queued) do
-    if file = find_failure(ref, queued) do
-      print_failure(file, reason)
-      for {pid, _, _, _} <- queued do
-        Process.exit(pid, :kill)
-      end
-      exit({:shutdown, 1})
+  defp handle_failure(queued) do
+    for {pid, _, _, _} <- queued do
+      Process.exit(pid, :kill)
     end
+    exit({:shutdown, 1})
   end
 
   defp find_failure(ref, queued) do
@@ -309,14 +315,34 @@ defmodule Kernel.ParallelCompiler do
     :ok
   end
 
-  defp print_failure(file, {:failure, kind, reason, stacktrace}) do
-    IO.write ["\n== Compilation error in file #{Path.relative_to_cwd(file)} ==\n",
-             Kernel.CLI.format_error(kind, reason, stacktrace)]
-  end
-
   defp print_failure(file, reason) do
     IO.write ["\n== Compilation error in file #{Path.relative_to_cwd(file)} ==\n",
-              Kernel.CLI.print_error(:exit, reason, [])]
+              failure_message(reason)]
+  end
+
+  defp failure_line(_file, {:failure, _kind, %{line: line}, _stacktrace}) when is_integer(line) do
+    line
+  end
+
+  defp failure_line(file, {:failure, _kind, _reason, stacktrace}) when is_list(stacktrace) do
+    Enum.find_value(Enum.reverse(stacktrace), fn
+      {_, _, _, location} when is_list(location) ->
+        if Keyword.get(location, :file) == to_charlist(file), do: Keyword.get(location, :line)
+      _ ->
+        false
+    end)
+  end
+
+  defp failure_line(_, _) do
+    nil
+  end
+
+  defp failure_message({:failure, kind, reason, stacktrace}) do
+    to_string(Kernel.CLI.format_error(kind, reason, stacktrace))
+  end
+
+  defp failure_message(reason) do
+    to_string(Kernel.CLI.format_error(:exit, reason, []))
   end
 
   defp cancel_waiting_timer(queued, child_pid) do
